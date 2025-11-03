@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datetime import date
+from datetime import timedelta
 from typing import Optional, Tuple
 
 import pandas as pd
@@ -87,17 +88,35 @@ with st.sidebar:
     cats = get_categories(nonce)
     sel_cats = st.multiselect("Category", cats, default=[])
 
+    params = {"start_d": str(start_d), "end_d": str(end_d)}
+    where = "created_at >= %(start_d)s AND created_at < (%(end_d)s::date + INTERVAL '1 day')"
+    if sel_cats:
+        where += " AND category = ANY(%(cats)s)"
+        params["cats"] = sel_cats
+
     st.markdown("---")
-    if st.button("🔄 Refresh data (clear cache)", use_container_width=True):
+    if st.button("Refresh data (clear cache)", use_container_width=True):
         st.session_state["_refresh_nonce"] = nonce + 1
         st.cache_data.clear()
         st.rerun()
 
-params = {"start_d": str(start_d), "end_d": str(end_d)}
-where = "created_at >= %(start_d)s AND created_at < (%(end_d)s::date + INTERVAL '1 day')"
-if sel_cats:
-    where += " AND category = ANY(%(cats)s)"
-    params["cats"] = sel_cats
+    slice_df = q(f"""
+        SELECT request_id, created_at, closed_at, status, category, subcategory, neighborhood
+        FROM sf311
+        WHERE {where}
+        ORDER BY created_at DESC
+        LIMIT 100000
+    """, params, _nonce=nonce)
+    if not slice_df.empty:
+        csv_bytes = slice_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download current slice (CSV)",
+            data=csv_bytes,
+            file_name=f"sf311_{start_d}_{end_d}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
 
 daily = q(f"""
     SELECT date(created_at) AS day, COUNT(*) AS requests
@@ -198,6 +217,74 @@ try:
     st.markdown(_insight_block(delta, top_area, top_area_count), unsafe_allow_html=True)
 except Exception:
     pass
+
+# --- Notable changes (week-over-week deltas) ---
+try:
+    # need at least 14 days ending at end_d
+    if (end_d - start_d).days >= 13:
+        curr_start = end_d - timedelta(days=6)
+        prev_start = end_d - timedelta(days=13)
+        prev_end   = end_d - timedelta(days=7)
+
+        wo_params = {
+            "cs": str(curr_start),
+            "ce": str(end_d),
+            "ps": str(prev_start),
+            "pe": str(prev_end),
+        }
+
+        by_cat_curr = q("""
+            SELECT COALESCE(category,'(unknown)') AS key, COUNT(*)::int AS cnt
+            FROM sf311
+            WHERE created_at >= %(cs)s AND created_at < (%(ce)s::date + INTERVAL '1 day')
+            GROUP BY 1
+        """, wo_params, _nonce=nonce).rename(columns={"cnt":"curr"})
+        by_cat_prev = q("""
+            SELECT COALESCE(category,'(unknown)') AS key, COUNT(*)::int AS cnt
+            FROM sf311
+            WHERE created_at >= %(ps)s AND created_at < (%(pe)s::date + INTERVAL '1 day')
+            GROUP BY 1
+        """, wo_params, _nonce=nonce).rename(columns={"cnt":"prev"})
+        cat = by_cat_curr.merge(by_cat_prev, on="key", how="outer").fillna(0)
+        cat["delta"] = cat["curr"] - cat["prev"]
+        cat["pct"] = cat.apply(lambda r: (r["delta"] / r["prev"] * 100) if r["prev"] else float("inf") if r["delta"]>0 else 0.0, axis=1)
+        cat = cat.sort_values(["delta","curr"], ascending=[False,False]).head(3)
+
+        by_nb_curr = q("""
+            SELECT COALESCE(neighborhood,'(unknown)') AS key, COUNT(*)::int AS cnt
+            FROM sf311
+            WHERE created_at >= %(cs)s AND created_at < (%(ce)s::date + INTERVAL '1 day')
+            GROUP BY 1
+        """, wo_params, _nonce=nonce).rename(columns={"cnt":"curr"})
+        by_nb_prev = q("""
+            SELECT COALESCE(neighborhood,'(unknown)') AS key, COUNT(*)::int AS cnt
+            FROM sf311
+            WHERE created_at >= %(ps)s AND created_at < (%(pe)s::date + INTERVAL '1 day')
+            GROUP BY 1
+        """, wo_params, _nonce=nonce).rename(columns={"cnt":"prev"})
+        nb = by_nb_curr.merge(by_nb_prev, on="key", how="outer").fillna(0)
+        nb["delta"] = nb["curr"] - nb["prev"]
+        nb["pct"] = nb.apply(lambda r: (r["delta"] / r["prev"] * 100) if r["prev"] else float("inf") if r["delta"]>0 else 0.0, axis=1)
+        nb = nb.sort_values(["delta","curr"], ascending=[False,False]).head(3)
+
+        st.markdown("### Notable changes (Week-over-Week)")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f"Category Trends (Week-over-Week)")
+            if not cat.empty:
+                st.dataframe(cat.rename(columns={"key":"category","curr":"this week","prev":"last week","delta":"Δ","pct":"Δ%"}), hide_index=True, use_container_width=True)
+            else:
+                st.caption("No category movement detected.")
+        with col_b:
+            st.markdown(f"Neighborhood Trends (Week-over-Week)")
+            if not nb.empty:
+                st.dataframe(nb.rename(columns={"key":"neighborhood","curr":"this week","prev":"last week","delta":"Δ","pct":"Δ%"}), hide_index=True, use_container_width=True)
+            else:
+                st.caption("No neighborhood movement detected.")
+    else:
+        st.caption("Not enough history for week-over-week changes (need ≥14 days in the selected range).")
+except Exception as _e:
+    st.caption("Could not compute week-over-week changes.")
 
 st.divider()
 
