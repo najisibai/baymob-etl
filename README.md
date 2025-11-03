@@ -17,10 +17,10 @@ All data is cached for quick access, and can be refreshed or exported anytime.
 ---
 
 ## Notable Features
- 1.	Interactive filters: Choose any date range or category to explore
-	2.	One-click refresh: Instantly pull the latest data from the database
-	3.	CSV export: Download your filtered results as a clean .csv file
-	4.	Week-to-week trends: Quickly spot which neighborhoods or request types changed the most
+1.	Interactive filters: Choose any date range or category to explore
+2.	One-click refresh: Instantly pull the latest data from the database
+3.	CSV export: Download your filtered results as a clean .csv file
+4.	Week-to-week trends: Quickly spot which neighborhoods or request types changed the most
 
 ---
 
