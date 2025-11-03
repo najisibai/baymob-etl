@@ -1,4 +1,4 @@
-"""Streamlit dashboard for SF311 ETL: KPIs, trends, breakdowns, and cache‑aware refresh."""
+"""Streamlit dashboard for SF311: daily ETL, key metrics, trends, and quick refresh."""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,7 +17,8 @@ st.markdown("""
         San Francisco 311 — City Operations Pulse
     </h1>
     <p style="color:#bbb; font-size:1.1rem; margin-top:0.2rem;">
-        Tracking trends in city service requests — volume, resolution, and neighborhood activity
+        Tracking San Francisco's 311 requests to see what's being reported, how quickly it's handled, and which neighborhoods stay busiest.
+
     </p>
 """, unsafe_allow_html=True)
 
@@ -44,6 +45,7 @@ st.markdown("""
       font-size: 1rem;
   }
   .block-container {padding-top: 3rem !important; padding-bottom: 1rem;}
+  .control-note { color:#9aa0a6; margin-top:-8px; margin-bottom:6px; text-align:center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,46 +79,52 @@ min_d, max_d = get_date_bounds(nonce)
 if pd.isna(min_d) or pd.isna(max_d):
     empty_state("No data available. Did you run the load step?")
 
-with st.sidebar:
-    st.header("Filters")
-    dr = st.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
-    if isinstance(dr, tuple):
-        start_d, end_d = dr
-    else:
-        start_d, end_d = min_d, max_d
+# --- Controls (top, compact expander) ---
+with st.expander("Filters & export", expanded=False):
+    st.caption("Adjust filters, refresh, or export without leaving the page.")
+    sp_l, c1, c2, cR, sp_r = st.columns([0.1, 1.5, 1.3, 0.8, 0.1], gap="medium")
+    with c1:
+        dr = st.date_input("Date range", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+        if isinstance(dr, tuple):
+            start_d, end_d = dr
+        else:
+            start_d, end_d = min_d, max_d
+    with c2:
+        cats = get_categories(nonce)
+        sel_cats = st.multiselect("Category", cats, default=[])
 
-    cats = get_categories(nonce)
-    sel_cats = st.multiselect("Category", cats, default=[])
-
+    # build query scope used by the whole app
     params = {"start_d": str(start_d), "end_d": str(end_d)}
     where = "created_at >= %(start_d)s AND created_at < (%(end_d)s::date + INTERVAL '1 day')"
     if sel_cats:
         where += " AND category = ANY(%(cats)s)"
         params["cats"] = sel_cats
 
-    st.markdown("---")
-    if st.button("Refresh data (clear cache)", use_container_width=True):
-        st.session_state["_refresh_nonce"] = nonce + 1
-        st.cache_data.clear()
-        st.rerun()
+    with cR:
+        if st.button("Refresh data", use_container_width=True):
+            st.session_state["_refresh_nonce"] = nonce + 1
+            st.cache_data.clear()
+            st.rerun()
+        # space between buttons
+        st.markdown("<div style='margin-top:1.2rem;'></div>", unsafe_allow_html=True)
+        slice_df = q(f"""
+            SELECT request_id, created_at, closed_at, status, category, subcategory, neighborhood
+            FROM sf311
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT 100000
+        """, params, _nonce=nonce)
+        if not slice_df.empty:
+            csv_bytes = slice_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download CSV",
+                data=csv_bytes,
+                file_name=f"sf311_{start_d}_{end_d}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
-    slice_df = q(f"""
-        SELECT request_id, created_at, closed_at, status, category, subcategory, neighborhood
-        FROM sf311
-        WHERE {where}
-        ORDER BY created_at DESC
-        LIMIT 100000
-    """, params, _nonce=nonce)
-    if not slice_df.empty:
-        csv_bytes = slice_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="Download current slice (CSV)",
-            data=csv_bytes,
-            file_name=f"sf311_{start_d}_{end_d}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
+st.markdown("")  # minimal spacing under expander
 
 daily = q(f"""
     SELECT date(created_at) AS day, COUNT(*) AS requests
@@ -214,6 +222,7 @@ try:
     else:
         top_area, top_area_count = "N/A", 0
 
+    st.markdown("### Notable changes (Week-over-Week)")
     st.markdown(_insight_block(delta, top_area, top_area_count), unsafe_allow_html=True)
 except Exception:
     pass
@@ -267,7 +276,6 @@ try:
         nb["pct"] = nb.apply(lambda r: (r["delta"] / r["prev"] * 100) if r["prev"] else float("inf") if r["delta"]>0 else 0.0, axis=1)
         nb = nb.sort_values(["delta","curr"], ascending=[False,False]).head(3)
 
-        st.markdown("### Notable changes (Week-over-Week)")
         col_a, col_b = st.columns(2)
         with col_a:
             st.markdown(f"Category Trends (Week-over-Week)")
